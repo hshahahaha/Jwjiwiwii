@@ -21,14 +21,35 @@ AUTHORIZED_USER_ID = 1427023555
 
 # ==================== Proxy Manager ====================
 class ProxyManager:
-    def __init__(self):
+    def __init__(self, storage_file="proxies.txt"):
         self.proxies: List[str] = []
         self.current_index = 0
+        self.storage_file = storage_file
+        self._load_proxies()
+    
+    def _load_proxies(self):
+        """Load proxies from file"""
+        try:
+            if os.path.exists(self.storage_file):
+                with open(self.storage_file, 'r') as f:
+                    self.proxies = [line.strip() for line in f if line.strip()]
+        except Exception:
+            pass
+    
+    def _save_proxies(self):
+        """Save proxies to file"""
+        try:
+            with open(self.storage_file, 'w') as f:
+                for proxy in self.proxies:
+                    f.write(f"{proxy}\n")
+        except Exception:
+            pass
     
     def add_proxy(self, proxy: str):
         """Add a single proxy"""
         if proxy and proxy not in self.proxies:
             self.proxies.append(proxy.strip())
+            self._save_proxies()
             return True
         return False
     
@@ -36,8 +57,11 @@ class ProxyManager:
         """Add multiple proxies from list"""
         added = 0
         for proxy in proxy_list:
-            if self.add_proxy(proxy):
+            if proxy and proxy.strip() not in self.proxies:
+                self.proxies.append(proxy.strip())
                 added += 1
+        if added > 0:
+            self._save_proxies()
         return added
     
     def get_next_proxy(self) -> Optional[str]:
@@ -61,10 +85,27 @@ class ProxyManager:
         """Clear all proxies"""
         self.proxies.clear()
         self.current_index = 0
+        self._save_proxies()
     
     def get_proxy_count(self) -> int:
         """Get total number of proxies"""
         return len(self.proxies)
+    
+    def remove_proxy(self, index: int) -> bool:
+        """Remove proxy by index (0-based)"""
+        if 0 <= index < len(self.proxies):
+            self.proxies.pop(index)
+            if self.current_index >= len(self.proxies) and self.proxies:
+                self.current_index = 0
+            self._save_proxies()
+            return True
+        return False
+    
+    def get_proxy_by_index(self, index: int) -> Optional[str]:
+        """Get proxy by index"""
+        if 0 <= index < len(self.proxies):
+            return self.proxies[index]
+        return None
     
     def get_current_proxy_info(self) -> str:
         """Get current proxy info for display"""
@@ -395,6 +436,8 @@ class CheckerStats:
         self.is_running = False
         self.start_time = None
         self.current_card = None
+        self.current_status = "Idle"  # Idle, Checking, Approved, Declined
+        self.delay_seconds = 5  # Default delay between cards
 
     def reset(self):
         self.charged = 0
@@ -438,6 +481,8 @@ def get_dashboard_text():
     if proxy_manager.get_proxy_count() > 0:
         proxy_info += f" ({proxy_manager.get_current_proxy_info()})"
     
+    delay_info = f"\n⏱️ Delay: {stats.delay_seconds}s between cards"
+    
     return f"""
 ╔═══════════════════════════╗
 ║   💳 CARD CHECKER BOT   ║
@@ -476,12 +521,18 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • /dashboard - Show live statistics dashboard
 • /check <card> - Check single card
 • /mass <cards> - Check multiple cards
+
+🌐 Proxy Management:
 • /proxy <proxy> - Add single proxy
-• /proxies - Show proxy info
+• /proxies - Show all saved proxies
+• /removeproxy <number> - Remove specific proxy
 • /clearproxy - Clear all proxies
+
+⏱️ Settings:
+• /delay <seconds> - Set delay between cards (default: 5s)
 • /1 - Stop current checking process
 
-📝 Card Format: 
+📏 Card Format: 
 5589660007409807|05|27|508
 
 🌐 Proxy Format:
@@ -491,6 +542,8 @@ Example: user:pass@proxy.com:9001
 📁 File Upload:
 • Send .txt file with cards
 • Send .txt file with proxies
+
+💾 Proxies are saved automatically!
 
 🚀 Ready to start!
 """
@@ -588,31 +641,84 @@ async def show_proxies_command(update: Update, context: ContextTypes.DEFAULT_TYP
     """Handle /proxies command to show proxy info"""
     count = proxy_manager.get_proxy_count()
     if count == 0:
-        await update.message.reply_text("ℹ️ No proxies added yet.\n\nUse /proxy to add one!")
+        await update.message.reply_text("ℹ️ No proxies saved.\n\nUse /proxy to add one!")
         return
     
-    response = f"🌐 **Proxy Information**\n\n"
-    response += f"📊 Total Proxies: {count}\n"
+    response = f"🌐 **Saved Proxies** ({count} total)\n\n"
     response += f"📍 Current: {proxy_manager.get_current_proxy_info()}\n\n"
-    response += f"**Proxies List:**\n"
     
-    for i, proxy in enumerate(proxy_manager.proxies[:10], 1):
+    for i, proxy in enumerate(proxy_manager.proxies, 1):
         # Hide password for security
-        display_proxy = proxy.split('@')[1] if '@' in proxy else proxy
-        response += f"{i}. {display_proxy}\n"
+        if '@' in proxy:
+            user_pass, host_port = proxy.split('@')
+            display_proxy = f"***@{host_port}"
+        else:
+            display_proxy = proxy
+        response += f"`{i}.` {display_proxy}\n"
     
-    if count > 10:
-        response += f"\n... and {count - 10} more"
+    response += f"\n💡 Use `/removeproxy <number>` to delete\nExample: `/removeproxy 1`"
     
     await update.message.reply_text(response, parse_mode='Markdown')
+
+
+@authorized_only
+async def remove_proxy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /removeproxy command to remove specific proxy"""
+    if not context.args:
+        await update.message.reply_text(
+            "❌ Usage: /removeproxy <number>\n"
+            "Example: /removeproxy 1\n\n"
+            "Use /proxies to see proxy numbers"
+        )
+        return
+    
+    try:
+        index = int(context.args[0]) - 1  # Convert to 0-based index
+        
+        if index < 0:
+            await update.message.reply_text("❌ Number must be positive!")
+            return
+        
+        proxy = proxy_manager.get_proxy_by_index(index)
+        if not proxy:
+            await update.message.reply_text(
+                f"❌ Proxy #{index + 1} not found!\n\n"
+                f"Total proxies: {proxy_manager.get_proxy_count()}\n"
+                f"Use /proxies to see all proxies"
+            )
+            return
+        
+        # Hide password in confirmation
+        if '@' in proxy:
+            display_proxy = f"***@{proxy.split('@')[1]}"
+        else:
+            display_proxy = proxy
+        
+        if proxy_manager.remove_proxy(index):
+            await update.message.reply_text(
+                f"✅ Proxy removed!\n\n"
+                f"🗑️ Removed: `{display_proxy}`\n"
+                f"🌐 Remaining: {proxy_manager.get_proxy_count()} proxies",
+                parse_mode='Markdown'
+            )
+            await update_dashboard(context)
+        else:
+            await update.message.reply_text("❌ Failed to remove proxy!")
+    
+    except ValueError:
+        await update.message.reply_text("❌ Invalid number! Use: /removeproxy 1")
 
 
 @authorized_only
 async def clear_proxies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /clearproxy command to clear all proxies"""
     count = proxy_manager.get_proxy_count()
+    if count == 0:
+        await update.message.reply_text("ℹ️ No proxies to clear!")
+        return
+    
     proxy_manager.clear_proxies()
-    await update.message.reply_text(f"✅ Cleared {count} proxies!")
+    await update.message.reply_text(f"✅ Cleared all {count} proxies!")
     await update_dashboard(context)
 
 
@@ -703,6 +809,37 @@ async def stop_command_1(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /stop command"""
     await stop_command_1(update, context)
+
+
+@authorized_only
+async def set_delay_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /delay command to set delay between cards"""
+    if not context.args:
+        await update.message.reply_text(
+            f"⏱️ Current delay: {stats.delay_seconds} seconds\n\n"
+            f"Usage: /delay <seconds>\n"
+            f"Example: /delay 5\n\n"
+            f"Recommended: 3-10 seconds"
+        )
+        return
+    
+    try:
+        delay = int(context.args[0])
+        if delay < 0:
+            await update.message.reply_text("❌ Delay must be 0 or positive!")
+            return
+        if delay > 60:
+            await update.message.reply_text("⚠️ Warning: Delay is very high! Maximum recommended is 60 seconds.")
+            return
+        
+        stats.delay_seconds = delay
+        await update.message.reply_text(
+            f"✅ Delay set to {delay} seconds!\n\n"
+            f"This delay will be applied between each card check."
+        )
+        await update_dashboard(context)
+    except ValueError:
+        await update.message.reply_text("❌ Invalid number! Use: /delay 5")
 
 
 @authorized_only
@@ -800,6 +937,10 @@ async def process_cards_list(update: Update, context: ContextTypes.DEFAULT_TYPE,
             stats.increment_declined()
         
         await update_dashboard(context)
+        
+        # Add delay between cards (except for the last one)
+        if i < len(cards) and stats.is_running:
+            await asyncio.sleep(stats.delay_seconds)
     
     stats.is_running = False
     stats.current_card = None
@@ -829,7 +970,9 @@ def main():
     application.add_handler(CommandHandler("mass", check_mass_cards))
     application.add_handler(CommandHandler("proxy", add_proxy_command))
     application.add_handler(CommandHandler("proxies", show_proxies_command))
+    application.add_handler(CommandHandler("removeproxy", remove_proxy_command))
     application.add_handler(CommandHandler("clearproxy", clear_proxies_command))
+    application.add_handler(CommandHandler("delay", set_delay_command))
     application.add_handler(CommandHandler("1", stop_command_1))
     application.add_handler(CommandHandler("stop", stop_command))
     application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
@@ -838,7 +981,9 @@ def main():
     print("✅ Bot started successfully!")
     print("🔗 Open Telegram and send /start to your bot")
     print("🌐 Proxy rotation enabled!")
+    print("💾 Proxies are saved automatically!")
     print("📁 You can send .txt files with cards or proxies!")
+    print("⏱️ Default delay: 5 seconds between cards")
     print("⏹ Press Ctrl+C to stop the bot\n")
     
     # Start bot
